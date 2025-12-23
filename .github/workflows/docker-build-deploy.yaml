@@ -66,17 +66,16 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    # Map secrets to env at job level for the 'if' check
-    env:
-      ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
-      ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
-    if: ${{ secrets.ARGOCD_TOKEN != '' && secrets.ARGOCD_SERVER != '' }}
     steps:
       - name: Trigger ArgoCD Deployment
+        # FIX: We check for secrets here inside the step using the ${{ }} syntax.
+        # If the secret is missing, this step is skipped, but the 'deploy' box still appears.
+        if: ${{ secrets.ARGOCD_TOKEN != '' && secrets.ARGOCD_SERVER != '' }}
         env:
+          ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
           TARGET_NAMESPACE: ${{ inputs.target_namespace }}
         run: |
-          # Recalculate APP_NAME for this job context
           RAW_APP_NAME="${{ inputs.deployment_name || github.event.repository.name }}"
           APP_NAME=$(echo "$RAW_APP_NAME" | tr '[:upper:]' '[:lower:]')
           
