@@ -1,5 +1,6 @@
 name: Shared Build and Deploy
 
+# This makes the workflow reusable by other repos
 on:
   workflow_call:
     inputs:
@@ -23,6 +24,12 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    # We map secrets to env at the job level so the 'if' condition can see them.
+    # In reusable workflows, 'secrets' context is restricted in step-level 'if' logic.
+    env:
+      ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
+      ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -37,9 +44,8 @@ jobs:
           echo "REPO_OWNER_LOWER=$REPO_OWNER_LOWER" >> $GITHUB_ENV
           echo "REPO_NAME_LOWER=$REPO_NAME_LOWER" >> $GITHUB_ENV
           
-          # Determine App Name (Input > Var > Repo Name)
-          # We export this to GITHUB_ENV so it persists across steps
-          RAW_APP_NAME="${{ inputs.deployment_name || vars.DEPLOYMENT_NAME || github.event.repository.name }}"
+          # Determine App Name: Use input, then fallback to repo name. Force lowercase.
+          RAW_APP_NAME="${{ inputs.deployment_name || github.event.repository.name }}"
           APP_NAME=$(echo "$RAW_APP_NAME" | tr '[:upper:]' '[:lower:]')
           echo "APP_NAME=$APP_NAME" >> $GITHUB_ENV
 
@@ -63,24 +69,22 @@ jobs:
             ghcr.io/${{ env.REPO_OWNER_LOWER }}/${{ env.REPO_NAME_LOWER }}:latest
 
       - name: Trigger ArgoCD Deployment
-        # FIX: The expression must be wrapped in ${{ }}
-        if: ${{ secrets.ARGOCD_TOKEN != '' && secrets.ARGOCD_SERVER != '' }}
+        # Using env. instead of secrets. here avoids the "Unrecognized named-value" error
+        if: ${{ env.ARGOCD_TOKEN != '' && env.ARGOCD_SERVER != '' }}
         env:
-          ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
-          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
           TARGET_NAMESPACE: ${{ inputs.target_namespace }}
-          # Use the variable we calculated in the second step
+          # APP_NAME is pulled from GITHUB_ENV populated in the second step
           APP_NAME: ${{ env.APP_NAME }}
         run: |
           echo "Restarting Deployment $APP_NAME in namespace $TARGET_NAMESPACE..."
 
-          # Restart Deployment
+          # Restart the Deployment to force image pull (since tag is :latest)
           curl -s -X POST "https://${ARGOCD_SERVER}/api/v1/applications/${APP_NAME}/resource/actions?namespace=${TARGET_NAMESPACE}&resourceName=${APP_NAME}&version=v1&kind=Deployment&group=apps" \
             -H "Authorization: Bearer $ARGOCD_TOKEN" \
             -H "Content-Type: application/json" \
             -d '"restart"'
 
-          # Sync Application
+          # Trigger sync to ensure app is healthy
           curl -s -X POST "https://${ARGOCD_SERVER}/api/v1/applications/${APP_NAME}/sync" \
             -H "Authorization: Bearer $ARGOCD_TOKEN" \
             -H "Content-Type: application/json" \
