@@ -68,8 +68,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger ArgoCD Deployment
-        # FIX: We check for secrets here inside the step using the ${{ }} syntax.
-        # If the secret is missing, this step is skipped, but the 'deploy' box still appears.
+        # FIX: Moving the 'if' check to the step level. 
+        # The parser allows 'secrets' here, but not at the job level above.
         if: ${{ secrets.ARGOCD_TOKEN != '' && secrets.ARGOCD_SERVER != '' }}
         env:
           ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
