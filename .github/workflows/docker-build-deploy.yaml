@@ -4,40 +4,32 @@ on:
   workflow_call:
     inputs:
       deployment_name:
-        description: 'Name of the k8s deployment (defaults to repo name)'
         required: false
         type: string
       target_namespace:
-        description: 'Target K8s namespace'
         required: false
         default: 'default'
         type: string
-      # --- NEW INPUTS ---
       build_context:
-        description: 'Docker build context'
         required: false
         default: '.'
         type: string
       dockerfile_path:
-        description: 'Path to the Dockerfile'
         required: false
         default: './Dockerfile'
         type: string
     secrets:
       GHCR_PAT:
-        required: true
+        required: false
       ARGOCD_TOKEN:
         required: false
       ARGOCD_SERVER:
         required: false
 
 jobs:
-  build-and-deploy:
+  # --- JOB 1: BUILD ---
+  build:
     runs-on: ubuntu-latest
-    env:
-      ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
-      ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
-    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -47,13 +39,8 @@ jobs:
         run: |
           REPO_OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           REPO_NAME_LOWER=$(echo "${{ github.repository }}" | cut -d '/' -f 2 | tr '[:upper:]' '[:lower:]')
-          
           echo "REPO_OWNER_LOWER=$REPO_OWNER_LOWER" >> $GITHUB_ENV
           echo "REPO_NAME_LOWER=$REPO_NAME_LOWER" >> $GITHUB_ENV
-          
-          RAW_APP_NAME="${{ inputs.deployment_name || github.event.repository.name }}"
-          APP_NAME=$(echo "$RAW_APP_NAME" | tr '[:upper:]' '[:lower:]')
-          echo "APP_NAME=$APP_NAME" >> $GITHUB_ENV
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -68,7 +55,6 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
-          # Use the new inputs here
           context: ${{ inputs.build_context }}
           file: ${{ inputs.dockerfile_path }}
           push: true
@@ -76,13 +62,26 @@ jobs:
             ghcr.io/${{ env.REPO_OWNER_LOWER }}/${{ env.REPO_NAME_LOWER }}:${{ github.sha }}
             ghcr.io/${{ env.REPO_OWNER_LOWER }}/${{ env.REPO_NAME_LOWER }}:latest
 
+  # --- JOB 2: DEPLOY ---
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    # Map secrets to env at job level for the 'if' check
+    env:
+      ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
+      ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+    if: ${{ secrets.ARGOCD_TOKEN != '' && secrets.ARGOCD_SERVER != '' }}
+    steps:
       - name: Trigger ArgoCD Deployment
-        if: ${{ env.ARGOCD_TOKEN != '' && env.ARGOCD_SERVER != '' }}
         env:
           TARGET_NAMESPACE: ${{ inputs.target_namespace }}
-          APP_NAME: ${{ env.APP_NAME }}
         run: |
+          # Recalculate APP_NAME for this job context
+          RAW_APP_NAME="${{ inputs.deployment_name || github.event.repository.name }}"
+          APP_NAME=$(echo "$RAW_APP_NAME" | tr '[:upper:]' '[:lower:]')
+          
           echo "Restarting Deployment $APP_NAME in namespace $TARGET_NAMESPACE..."
+
           curl -s -X POST "https://${ARGOCD_SERVER}/api/v1/applications/${APP_NAME}/resource/actions?namespace=${TARGET_NAMESPACE}&resourceName=${APP_NAME}&version=v1&kind=Deployment&group=apps" \
             -H "Authorization: Bearer $ARGOCD_TOKEN" \
             -H "Content-Type: application/json" \
@@ -92,4 +91,3 @@ jobs:
             -H "Authorization: Bearer $ARGOCD_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"prune": false}'
-          echo "Deployment triggered successfully!"
