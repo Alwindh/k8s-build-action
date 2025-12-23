@@ -1,0 +1,88 @@
+name: Shared Build and Deploy
+
+# This makes the workflow reusable by other repos
+on:
+  workflow_call:
+    inputs:
+      deployment_name:
+        description: 'Name of the k8s deployment (defaults to repo name)'
+        required: false
+        type: string
+      target_namespace:
+        description: 'Target K8s namespace'
+        required: false
+        default: 'default'
+        type: string
+    secrets:
+      GHCR_PAT:
+        required: true
+      ARGOCD_TOKEN:
+        required: false
+      ARGOCD_SERVER:
+        required: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Calculate Variables
+        id: vars
+        run: |
+          # Lowercase conversion for Docker tags
+          REPO_OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          REPO_NAME_LOWER=$(echo "${{ github.repository }}" | cut -d '/' -f 2 | tr '[:upper:]' '[:lower:]')
+          
+          echo "REPO_OWNER_LOWER=$REPO_OWNER_LOWER" >> $GITHUB_ENV
+          echo "REPO_NAME_LOWER=$REPO_NAME_LOWER" >> $GITHUB_ENV
+          
+          # Determine App Name (Input > Var > Repo Name)
+          APP_NAME="${{ inputs.deployment_name || vars.DEPLOYMENT_NAME || github.event.repository.name }}"
+          echo "APP_NAME=$APP_NAME" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ env.REPO_OWNER_LOWER }}/${{ env.REPO_NAME_LOWER }}:${{ github.sha }}
+            ghcr.io/${{ env.REPO_OWNER_LOWER }}/${{ env.REPO_NAME_LOWER }}:latest
+
+      - name: Trigger ArgoCD Deployment
+        # Only run if token is provided
+        if: ${{ secrets.ARGOCD_TOKEN != '' }}
+        env:
+          ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+          TARGET_NAMESPACE: ${{ inputs.target_namespace }}
+        run: |
+          APP_NAME_LOWER=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]')
+          
+          echo "Restarting Deployment $APP_NAME_LOWER in namespace $TARGET_NAMESPACE..."
+
+          # Restart Deployment
+          curl -s -X POST "https://${ARGOCD_SERVER}/api/v1/applications/${APP_NAME_LOWER}/resource/actions?namespace=${TARGET_NAMESPACE}&resourceName=${APP_NAME_LOWER}&version=v1&kind=Deployment&group=apps" \
+            -H "Authorization: Bearer $ARGOCD_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '"restart"'
+
+          # Sync Application
+          curl -s -X POST "https://${ARGOCD_SERVER}/api/v1/applications/${APP_NAME_LOWER}/sync" \
+            -H "Authorization: Bearer $ARGOCD_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"prune": false}'
+
+          echo "Deployment triggered successfully!"
