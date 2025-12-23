@@ -66,11 +66,14 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # WE MAP THE SECRETS TO ENV HERE
+    env:
+      CHECK_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
+      CHECK_SERVER: ${{ secrets.ARGOCD_SERVER }}
     steps:
       - name: Trigger ArgoCD Deployment
-        # FIX: Moving the 'if' check to the step level. 
-        # The parser allows 'secrets' here, but not at the job level above.
-        if: ${{ secrets.ARGOCD_TOKEN != '' && secrets.ARGOCD_SERVER != '' }}
+        # NOW WE CHECK THE ENV CONTEXT, NOT SECRETS
+        if: ${{ env.CHECK_TOKEN != '' && env.CHECK_SERVER != '' }}
         env:
           ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
           ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
