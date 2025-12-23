@@ -18,6 +18,11 @@ on:
         required: false
         default: './Dockerfile'
         type: string
+      # ADDED: A flag to manually disable deploy if needed
+      skip_deploy:
+        required: false
+        default: false
+        type: boolean
     secrets:
       GHCR_PAT:
         required: false
@@ -27,7 +32,6 @@ on:
         required: false
 
 jobs:
-  # --- JOB 1: BUILD ---
   build:
     runs-on: ubuntu-latest
     steps:
@@ -62,18 +66,27 @@ jobs:
             ghcr.io/${{ env.REPO_OWNER_LOWER }}/${{ env.REPO_NAME_LOWER }}:${{ github.sha }}
             ghcr.io/${{ env.REPO_OWNER_LOWER }}/${{ env.REPO_NAME_LOWER }}:latest
 
-  # --- JOB 2: DEPLOY ---
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    # WE MAP THE SECRETS TO ENV HERE
-    env:
-      CHECK_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
-      CHECK_SERVER: ${{ secrets.ARGOCD_SERVER }}
+    # This job-level 'if' will result in a grey "skipped" icon if the secret is missing.
+    # Note: We use !github.event.repository.private or similar logic if needed, 
+    # but checking for the presence of the secret here usually works if passed as an env or checked via a trick.
     steps:
+      - name: Check Deployment Requirements
+        id: check
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.ARGOCD_TOKEN }}" ] || [ -z "${{ secrets.ARGOCD_SERVER }}" ]; then
+            echo "::warning::Missing ArgoCD secrets. Skipping deployment step."
+            echo "should_deploy=false" >> $GITHUB_OUTPUT
+          else
+            echo "should_deploy=true" >> $GITHUB_OUTPUT
+          fi
+
       - name: Trigger ArgoCD Deployment
-        # NOW WE CHECK THE ENV CONTEXT, NOT SECRETS
-        if: ${{ env.CHECK_TOKEN != '' && env.CHECK_SERVER != '' }}
+        # Now this step only runs if the check passed.
+        if: steps.check.outputs.should_deploy == 'true'
         env:
           ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
           ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
@@ -83,7 +96,7 @@ jobs:
           APP_NAME=$(echo "$RAW_APP_NAME" | tr '[:upper:]' '[:lower:]')
           
           echo "Restarting Deployment $APP_NAME in namespace $TARGET_NAMESPACE..."
-
+          
           curl -s -X POST "https://${ARGOCD_SERVER}/api/v1/applications/${APP_NAME}/resource/actions?namespace=${TARGET_NAMESPACE}&resourceName=${APP_NAME}&version=v1&kind=Deployment&group=apps" \
             -H "Authorization: Bearer $ARGOCD_TOKEN" \
             -H "Content-Type: application/json" \
