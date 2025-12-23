@@ -1,6 +1,5 @@
 name: Shared Build and Deploy
 
-# This makes the workflow reusable by other repos
 on:
   workflow_call:
     inputs:
@@ -39,7 +38,9 @@ jobs:
           echo "REPO_NAME_LOWER=$REPO_NAME_LOWER" >> $GITHUB_ENV
           
           # Determine App Name (Input > Var > Repo Name)
-          APP_NAME="${{ inputs.deployment_name || vars.DEPLOYMENT_NAME || github.event.repository.name }}"
+          # We export this to GITHUB_ENV so it persists across steps
+          RAW_APP_NAME="${{ inputs.deployment_name || vars.DEPLOYMENT_NAME || github.event.repository.name }}"
+          APP_NAME=$(echo "$RAW_APP_NAME" | tr '[:upper:]' '[:lower:]')
           echo "APP_NAME=$APP_NAME" >> $GITHUB_ENV
 
       - name: Set up Docker Buildx
@@ -62,25 +63,25 @@ jobs:
             ghcr.io/${{ env.REPO_OWNER_LOWER }}/${{ env.REPO_NAME_LOWER }}:latest
 
       - name: Trigger ArgoCD Deployment
-        # Only run if token is provided
-        if: ${{ secrets.ARGOCD_TOKEN != '' }}
+        # FIX: The expression must be wrapped in ${{ }}
+        if: ${{ secrets.ARGOCD_TOKEN != '' && secrets.ARGOCD_SERVER != '' }}
         env:
           ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
           ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
           TARGET_NAMESPACE: ${{ inputs.target_namespace }}
+          # Use the variable we calculated in the second step
+          APP_NAME: ${{ env.APP_NAME }}
         run: |
-          APP_NAME_LOWER=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]')
-          
-          echo "Restarting Deployment $APP_NAME_LOWER in namespace $TARGET_NAMESPACE..."
+          echo "Restarting Deployment $APP_NAME in namespace $TARGET_NAMESPACE..."
 
           # Restart Deployment
-          curl -s -X POST "https://${ARGOCD_SERVER}/api/v1/applications/${APP_NAME_LOWER}/resource/actions?namespace=${TARGET_NAMESPACE}&resourceName=${APP_NAME_LOWER}&version=v1&kind=Deployment&group=apps" \
+          curl -s -X POST "https://${ARGOCD_SERVER}/api/v1/applications/${APP_NAME}/resource/actions?namespace=${TARGET_NAMESPACE}&resourceName=${APP_NAME}&version=v1&kind=Deployment&group=apps" \
             -H "Authorization: Bearer $ARGOCD_TOKEN" \
             -H "Content-Type: application/json" \
             -d '"restart"'
 
           # Sync Application
-          curl -s -X POST "https://${ARGOCD_SERVER}/api/v1/applications/${APP_NAME_LOWER}/sync" \
+          curl -s -X POST "https://${ARGOCD_SERVER}/api/v1/applications/${APP_NAME}/sync" \
             -H "Authorization: Bearer $ARGOCD_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"prune": false}'
