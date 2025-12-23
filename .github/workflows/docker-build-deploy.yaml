@@ -1,6 +1,5 @@
 name: Shared Build and Deploy
 
-# This makes the workflow reusable by other repos
 on:
   workflow_call:
     inputs:
@@ -13,6 +12,17 @@ on:
         required: false
         default: 'default'
         type: string
+      # --- NEW INPUTS ---
+      build_context:
+        description: 'Docker build context'
+        required: false
+        default: '.'
+        type: string
+      dockerfile_path:
+        description: 'Path to the Dockerfile'
+        required: false
+        default: './Dockerfile'
+        type: string
     secrets:
       GHCR_PAT:
         required: true
@@ -24,8 +34,6 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    # We map secrets to env at the job level so the 'if' condition can see them.
-    # In reusable workflows, 'secrets' context is restricted in step-level 'if' logic.
     env:
       ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
       ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
@@ -37,14 +45,12 @@ jobs:
       - name: Calculate Variables
         id: vars
         run: |
-          # Lowercase conversion for Docker tags
           REPO_OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           REPO_NAME_LOWER=$(echo "${{ github.repository }}" | cut -d '/' -f 2 | tr '[:upper:]' '[:lower:]')
           
           echo "REPO_OWNER_LOWER=$REPO_OWNER_LOWER" >> $GITHUB_ENV
           echo "REPO_NAME_LOWER=$REPO_NAME_LOWER" >> $GITHUB_ENV
           
-          # Determine App Name: Use input, then fallback to repo name. Force lowercase.
           RAW_APP_NAME="${{ inputs.deployment_name || github.event.repository.name }}"
           APP_NAME=$(echo "$RAW_APP_NAME" | tr '[:upper:]' '[:lower:]')
           echo "APP_NAME=$APP_NAME" >> $GITHUB_ENV
@@ -62,32 +68,28 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
-          context: .
+          # Use the new inputs here
+          context: ${{ inputs.build_context }}
+          file: ${{ inputs.dockerfile_path }}
           push: true
           tags: |
             ghcr.io/${{ env.REPO_OWNER_LOWER }}/${{ env.REPO_NAME_LOWER }}:${{ github.sha }}
             ghcr.io/${{ env.REPO_OWNER_LOWER }}/${{ env.REPO_NAME_LOWER }}:latest
 
       - name: Trigger ArgoCD Deployment
-        # Using env. instead of secrets. here avoids the "Unrecognized named-value" error
         if: ${{ env.ARGOCD_TOKEN != '' && env.ARGOCD_SERVER != '' }}
         env:
           TARGET_NAMESPACE: ${{ inputs.target_namespace }}
-          # APP_NAME is pulled from GITHUB_ENV populated in the second step
           APP_NAME: ${{ env.APP_NAME }}
         run: |
           echo "Restarting Deployment $APP_NAME in namespace $TARGET_NAMESPACE..."
-
-          # Restart the Deployment to force image pull (since tag is :latest)
           curl -s -X POST "https://${ARGOCD_SERVER}/api/v1/applications/${APP_NAME}/resource/actions?namespace=${TARGET_NAMESPACE}&resourceName=${APP_NAME}&version=v1&kind=Deployment&group=apps" \
             -H "Authorization: Bearer $ARGOCD_TOKEN" \
             -H "Content-Type: application/json" \
             -d '"restart"'
 
-          # Trigger sync to ensure app is healthy
           curl -s -X POST "https://${ARGOCD_SERVER}/api/v1/applications/${APP_NAME}/sync" \
             -H "Authorization: Bearer $ARGOCD_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"prune": false}'
-
           echo "Deployment triggered successfully!"
