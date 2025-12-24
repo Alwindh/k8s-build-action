@@ -1,117 +1,129 @@
 name: Shared Build and Deploy
 
 on:
-  workflow_call:
-    inputs:
-      argo_app_name:
-        description: 'The name of the Application in ArgoCD (defaults to repo name)'
-        required: false
-        type: string
-      deployment_name:
-        description: 'The specific K8s deployment to restart (defaults to repo name)'
-        required: false
-        type: string
-      target_namespace:
-        description: 'Target K8s namespace'
-        required: false
-        default: 'default'
-        type: string
-      build_context:
-        description: 'Docker build context'
-        required: false
-        default: '.'
-        type: string
-      dockerfile_path:
-        description: 'Path to the Dockerfile'
-        required: false
-        default: './Dockerfile'
-        type: string
-    secrets:
-      GHCR_PAT: { required: false }
-      ARGOCD_TOKEN: { required: false }
-      ARGOCD_SERVER: { required: false }
+    workflow_call:
+        inputs:
+            image_name:
+                description: "Override the image name (defaults to repo name)"
+                required: false
+                type: string
+            argo_app_name:
+                description: "The name of the Application in ArgoCD (defaults to repo name)"
+                required: false
+                type: string
+            deployment_name:
+                description: "The specific K8s deployment to restart (defaults to repo name)"
+                required: false
+                type: string
+            target_namespace:
+                description: "Target K8s namespace"
+                required: false
+                default: "default"
+                type: string
+            build_context:
+                description: "Docker build context"
+                required: false
+                default: "."
+                type: string
+            dockerfile_path:
+                description: "Path to the Dockerfile"
+                required: false
+                default: "./Dockerfile"
+                type: string
+        secrets:
+            GHCR_PAT: { required: false }
+            ARGOCD_TOKEN: { required: false }
+            ARGOCD_SERVER: { required: false }
 
 jobs:
-  check-secrets:
-    runs-on: ubuntu-latest
-    outputs:
-      has_argo_secrets: ${{ steps.check.outputs.has_argo_secrets }}
-    steps:
-      - id: check
-        shell: bash
-        run: |
-          if [ -n "${{ secrets.ARGOCD_TOKEN }}" ] && [ -n "${{ secrets.ARGOCD_SERVER }}" ]; then
-            echo "has_argo_secrets=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_argo_secrets=false" >> $GITHUB_OUTPUT
-          fi
+    check-secrets:
+        runs-on: ubuntu-latest
+        outputs:
+            has_argo_secrets: ${{ steps.check.outputs.has_argo_secrets }}
+        steps:
+            - id: check
+              shell: bash
+              run: |
+                  if [ -n "${{ secrets.ARGOCD_TOKEN }}" ] && [ -n "${{ secrets.ARGOCD_SERVER }}" ]; then
+                    echo "has_argo_secrets=true" >> $GITHUB_OUTPUT
+                  else
+                    echo "has_argo_secrets=false" >> $GITHUB_OUTPUT
+                  fi
 
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Calculate Variables
-        id: vars
-        run: |
-          REPO_OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          REPO_NAME_LOWER=$(echo "${{ github.repository }}" | cut -d '/' -f 2 | tr '[:upper:]' '[:lower:]')
-          echo "IMAGE_URL=ghcr.io/$REPO_OWNER_LOWER/$REPO_NAME_LOWER" >> $GITHUB_ENV
+    build:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+            - name: Calculate Variables
+              id: vars
+              run: |
+                  REPO_OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+                  REPO_NAME_LOWER=$(echo "${{ github.repository }}" | cut -d '/' -f 2 | tr '[:upper:]' '[:lower:]')
 
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_PAT }}
+                  # Use custom image name if provided, otherwise default to repo name
+                  if [ -n "${{ inputs.image_name }}" ]; then
+                    IMAGE_NAME=$(echo "${{ inputs.image_name }}" | tr '[:upper:]' '[:lower:]')
+                  else
+                    IMAGE_NAME=$REPO_NAME_LOWER
+                  fi
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ inputs.build_context }}
-          file: ${{ inputs.dockerfile_path }}
-          push: true
-          tags: |
-            ${{ env.IMAGE_URL }}:${{ github.sha }}
-            ${{ env.IMAGE_URL }}:latest
+                  echo "IMAGE_URL=ghcr.io/$REPO_OWNER_LOWER/$IMAGE_NAME" >> $GITHUB_ENV
 
-  deploy:
-    needs: [build, check-secrets]
-    if: needs.check-secrets.outputs.has_argo_secrets == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger ArgoCD Deployment
-        env:
-          ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
-          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
-        run: |
-          # Fallback Logic: Input > Repo Name
-          # We convert to lowercase immediately to ensure API compatibility
-          REPO_NAME=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')
-          
-          RAW_APP="${{ inputs.argo_app_name }}"
-          APP=${RAW_APP:-$REPO_NAME}
-          
-          RAW_DEP="${{ inputs.deployment_name }}"
-          DEP=${RAW_DEP:-$REPO_NAME}
-          
-          NS="${{ inputs.target_namespace }}"
-          
-          echo "Targeting Argo App: $APP"
-          echo "Restarting Deployment: $DEP"
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v3
 
-          # Force restart of the specific component
-          curl -s -X POST "https://${ARGOCD_SERVER}/api/v1/applications/${APP}/resource/actions?namespace=${NS}&resourceName=${DEP}&version=v1&kind=Deployment&group=apps" \
-            -H "Authorization: Bearer $ARGOCD_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '"restart"'
-          
-          # Sync ONLY the specific resource
-          curl -s -X POST "https://${ARGOCD_SERVER}/api/v1/applications/${APP}/sync" \
-            -H "Authorization: Bearer $ARGOCD_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"resources\": [{\"group\": \"apps\", \"kind\": \"Deployment\", \"name\": \"$DEP\", \"namespace\": \"$NS\"}]}"
+            - name: Login to GHCR
+              uses: docker/login-action@v3
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GHCR_PAT }}
+
+            - name: Build and push
+              uses: docker/build-push-action@v6
+              with:
+                  context: ${{ inputs.build_context }}
+                  file: ${{ inputs.dockerfile_path }}
+                  push: true
+                  tags: |
+                      ${{ env.IMAGE_URL }}:${{ github.sha }}
+                      ${{ env.IMAGE_URL }}:latest
+
+    deploy:
+        needs: [build, check-secrets]
+        if: needs.check-secrets.outputs.has_argo_secrets == 'true'
+        runs-on: ubuntu-latest
+        steps:
+            - name: Trigger ArgoCD Deployment
+              env:
+                  ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
+                  ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+              run: |
+                  # Fallback Logic: Input > Repo Name
+                  # We convert to lowercase immediately to ensure API compatibility
+                  REPO_NAME=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')
+
+                  RAW_APP="${{ inputs.argo_app_name }}"
+                  APP=${RAW_APP:-$REPO_NAME}
+
+                  RAW_DEP="${{ inputs.deployment_name }}"
+                  DEP=${RAW_DEP:-$REPO_NAME}
+
+                  NS="${{ inputs.target_namespace }}"
+
+                  echo "Targeting Argo App: $APP"
+                  echo "Restarting Deployment: $DEP"
+
+                  # Force restart of the specific component
+                  curl -s -X POST "https://${ARGOCD_SERVER}/api/v1/applications/${APP}/resource/actions?namespace=${NS}&resourceName=${DEP}&version=v1&kind=Deployment&group=apps" \
+                    -H "Authorization: Bearer $ARGOCD_TOKEN" \
+                    -H "Content-Type: application/json" \
+                    -d '"restart"'
+
+                  # Sync ONLY the specific resource
+                  curl -s -X POST "https://${ARGOCD_SERVER}/api/v1/applications/${APP}/sync" \
+                    -H "Authorization: Bearer $ARGOCD_TOKEN" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"resources\": [{\"group\": \"apps\", \"kind\": \"Deployment\", \"name\": \"$DEP\", \"namespace\": \"$NS\"}]}"
