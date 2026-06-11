@@ -101,29 +101,89 @@ jobs:
                   ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
                   ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
               run: |
-                  # Fallback Logic: Input > Repo Name
-                  # We convert to lowercase immediately to ensure API compatibility
-                  REPO_NAME=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')
+                  set -euo pipefail
 
-                  RAW_APP="${{ inputs.argo_app_name }}"
-                  APP=${RAW_APP:-$REPO_NAME}
+                    # Fallback Logic: Input > Repo Name
+                    # We convert to lowercase immediately to ensure API compatibility
+                    REPO_NAME=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')
 
-                  RAW_DEP="${{ inputs.deployment_name }}"
-                  DEP=${RAW_DEP:-$REPO_NAME}
+                    RAW_APP="${{ inputs.argo_app_name }}"
+                    APP=${RAW_APP:-$REPO_NAME}
 
-                  NS="${{ inputs.target_namespace }}"
+                    RAW_DEP="${{ inputs.deployment_name }}"
+                    DEP=${RAW_DEP:-$REPO_NAME}
 
-                  echo "Targeting Argo App: $APP"
-                  echo "Restarting Deployment: $DEP"
+                    NS="${{ inputs.target_namespace }}"
 
-                  # Force restart of the specific component
-                  curl -s -X POST "https://${ARGOCD_SERVER}/api/v1/applications/${APP}/resource/actions?namespace=${NS}&resourceName=${DEP}&version=v1&kind=Deployment&group=apps" \
-                    -H "Authorization: Bearer $ARGOCD_TOKEN" \
-                    -H "Content-Type: application/json" \
-                    -d '"restart"'
+                    echo "Targeting Argo App: $APP"
+                    echo "Restarting Deployment: $DEP"
 
-                  # Sync ONLY the specific resource
-                  curl -s -X POST "https://${ARGOCD_SERVER}/api/v1/applications/${APP}/sync" \
-                    -H "Authorization: Bearer $ARGOCD_TOKEN" \
-                    -H "Content-Type: application/json" \
-                    -d "{\"resources\": [{\"group\": \"apps\", \"kind\": \"Deployment\", \"name\": \"$DEP\", \"namespace\": \"$NS\"}]}"
+                    argo_api_post() {
+                      local url="$1"
+                      local payload="$2"
+                      local action_name="$3"
+
+                      local body_file
+                      local header_file
+                      local http_code
+                      local content_type
+
+                      body_file=$(mktemp)
+                      header_file=$(mktemp)
+
+                      if ! http_code=$(curl --silent --show-error --output "$body_file" --dump-header "$header_file" --write-out "%{http_code}" --request POST "$url" \
+                        -H "Authorization: Bearer $ARGOCD_TOKEN" \
+                        -H "Content-Type: application/json" \
+                        -d "$payload"); then
+                        echo "ArgoCD API call failed during: $action_name"
+                        rm -f "$body_file" "$header_file"
+                        exit 1
+                      fi
+
+                      content_type=$(awk -F': *' 'tolower($1)=="content-type" {print tolower($2)}' "$header_file" | tr -d '\r' | tail -n 1)
+
+                      echo "ArgoCD API status ($action_name): $http_code"
+
+                      if [[ ! "$http_code" =~ ^2 ]]; then
+                        echo "ArgoCD API returned non-success status during: $action_name"
+                        echo "Response body:"
+                        sed -n '1,80p' "$body_file"
+                        rm -f "$body_file" "$header_file"
+                        exit 1
+                      fi
+
+                      if [[ -n "$content_type" && "$content_type" != *"json"* ]]; then
+                        echo "ArgoCD API returned unexpected content type during: $action_name"
+                        echo "Content-Type: $content_type"
+                        echo "Response body:"
+                        sed -n '1,80p' "$body_file"
+                        rm -f "$body_file" "$header_file"
+                        exit 1
+                      fi
+
+                      if grep -qi '<html' "$body_file"; then
+                        echo "ArgoCD API returned HTML during: $action_name"
+                        echo "This usually indicates redirect/auth/proxy issues."
+                        echo "Response body:"
+                        sed -n '1,80p' "$body_file"
+                        rm -f "$body_file" "$header_file"
+                        exit 1
+                      fi
+
+                      echo "Response ($action_name):"
+                      sed -n '1,40p' "$body_file"
+
+                      rm -f "$body_file" "$header_file"
+                    }
+
+                    # Force restart of the specific component
+                    argo_api_post \
+                      "https://${ARGOCD_SERVER}/api/v1/applications/${APP}/resource/actions?namespace=${NS}&resourceName=${DEP}&version=v1&kind=Deployment&group=apps" \
+                      '"restart"' \
+                      "restart deployment"
+
+                    # Sync ONLY the specific resource
+                    argo_api_post \
+                      "https://${ARGOCD_SERVER}/api/v1/applications/${APP}/sync" \
+                      "{\"resources\": [{\"group\": \"apps\", \"kind\": \"Deployment\", \"name\": \"$DEP\", \"namespace\": \"$NS\"}]}" \
+                      "sync deployment"
