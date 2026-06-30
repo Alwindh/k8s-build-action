@@ -122,58 +122,70 @@ jobs:
                       local url="$1"
                       local payload="$2"
                       local action_name="$3"
+                      local max_retries="${4:-3}"
+                      local retry_count=0
+                      local wait_time=2
 
                       local body_file
                       local header_file
                       local http_code
                       local content_type
+                      local error_code
 
-                      body_file=$(mktemp)
-                      header_file=$(mktemp)
+                      while [[ $retry_count -lt $max_retries ]]; do
+                        body_file=$(mktemp)
+                        header_file=$(mktemp)
 
-                      if ! http_code=$(curl --silent --show-error --output "$body_file" --dump-header "$header_file" --write-out "%{http_code}" --request POST "$url" \
-                        -H "Authorization: Bearer $ARGOCD_TOKEN" \
-                        -H "Content-Type: application/json" \
-                        -d "$payload"); then
-                        echo "ArgoCD API call failed during: $action_name"
-                        rm -f "$body_file" "$header_file"
-                        exit 1
-                      fi
+                        if ! http_code=$(curl --silent --show-error --output "$body_file" --dump-header "$header_file" --write-out "%{http_code}" --request POST "$url" \
+                          -H "Authorization: Bearer $ARGOCD_TOKEN" \
+                          -H "Content-Type: application/json" \
+                          -d "$payload"); then
+                          echo "ArgoCD API call failed during: $action_name"
+                          rm -f "$body_file" "$header_file"
+                          exit 1
+                        fi
 
-                      content_type=$(awk -F': *' 'tolower($1)=="content-type" {print tolower($2)}' "$header_file" | tr -d '\r' | tail -n 1)
+                        content_type=$(awk -F': *' 'tolower($1)=="content-type" {print tolower($2)}' "$header_file" | tr -d '\r' | tail -n 1)
 
-                      echo "ArgoCD API status ($action_name): $http_code"
+                        echo "ArgoCD API status ($action_name): $http_code"
 
-                      if [[ ! "$http_code" =~ ^2 ]]; then
+                        if [[ "$http_code" =~ ^2 ]]; then
+                          echo "Response ($action_name):"
+                          sed -n '1,40p' "$body_file"
+                          rm -f "$body_file" "$header_file"
+                          return 0
+                        fi
+
+                        # Check if this is a retryable error (operation in progress)
+                        error_code=$(grep -o '"code":[0-9]*' "$body_file" 2>/dev/null | grep -o '[0-9]*$' || echo "")
+                        if [[ "$error_code" == "9" ]] && [[ $retry_count -lt $((max_retries - 1)) ]]; then
+                          echo "Operation already in progress (code 9). Retrying in ${wait_time}s (attempt $((retry_count + 1))/$max_retries)..."
+                          rm -f "$body_file" "$header_file"
+                          sleep "$wait_time"
+                          wait_time=$((wait_time * 2))
+                          retry_count=$((retry_count + 1))
+                          continue
+                        fi
+
+                        # Non-retryable error
                         echo "ArgoCD API returned non-success status during: $action_name"
                         echo "Response body:"
                         sed -n '1,80p' "$body_file"
+
+                        if [[ -n "$content_type" && "$content_type" != *"json"* ]]; then
+                          echo "Unexpected content type: $content_type"
+                        fi
+
+                        if grep -qi '<html' "$body_file"; then
+                          echo "Received HTML response - likely redirect/auth/proxy issue"
+                        fi
+
                         rm -f "$body_file" "$header_file"
                         exit 1
-                      fi
+                      done
 
-                      if [[ -n "$content_type" && "$content_type" != *"json"* ]]; then
-                        echo "ArgoCD API returned unexpected content type during: $action_name"
-                        echo "Content-Type: $content_type"
-                        echo "Response body:"
-                        sed -n '1,80p' "$body_file"
-                        rm -f "$body_file" "$header_file"
-                        exit 1
-                      fi
-
-                      if grep -qi '<html' "$body_file"; then
-                        echo "ArgoCD API returned HTML during: $action_name"
-                        echo "This usually indicates redirect/auth/proxy issues."
-                        echo "Response body:"
-                        sed -n '1,80p' "$body_file"
-                        rm -f "$body_file" "$header_file"
-                        exit 1
-                      fi
-
-                      echo "Response ($action_name):"
-                      sed -n '1,40p' "$body_file"
-
-                      rm -f "$body_file" "$header_file"
+                      echo "Max retries ($max_retries) exceeded for: $action_name"
+                      exit 1
                     }
 
                     # Force restart of the specific component
@@ -182,8 +194,13 @@ jobs:
                       '"restart"' \
                       "restart deployment"
 
-                    # Sync ONLY the specific resource
+                    # Wait for restart operation to complete before syncing
+                    echo "Waiting 3 seconds for restart operation to settle..."
+                    sleep 3
+
+                    # Sync ONLY the specific resource (with retries for in-progress operations)
                     argo_api_post \
                       "https://${ARGOCD_SERVER}/api/v1/applications/${APP}/sync" \
                       "{\"resources\": [{\"group\": \"apps\", \"kind\": \"Deployment\", \"name\": \"$DEP\", \"namespace\": \"$NS\"}]}" \
-                      "sync deployment"
+                      "sync deployment" \
+                      5
