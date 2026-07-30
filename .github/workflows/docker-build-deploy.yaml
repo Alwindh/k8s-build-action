@@ -3,6 +3,10 @@ name: Shared Build and Deploy
 on:
     workflow_call:
         inputs:
+            ref:
+                description: "Git ref to check out and build. Set this when the caller is triggered by workflow_run (e.g. ${{ github.event.workflow_run.head_sha }}) - without it, checkout falls back to the default branch instead of the ref that actually triggered the run. Leave empty for normal push/dispatch triggers."
+                required: false
+                type: string
             image_name:
                 description: "Override the image name (defaults to repo name)"
                 required: false
@@ -31,9 +35,15 @@ on:
                 default: "./Dockerfile"
                 type: string
         secrets:
-            GHCR_PAT: { required: false }
+            GHCR_PAT:
+                description: "Optional. If omitted, GHCR login falls back to the caller's GITHUB_TOKEN (needs the packages: write permission, which this workflow requests by default)."
+                required: false
             ARGOCD_TOKEN: { required: false }
             ARGOCD_SERVER: { required: false }
+
+permissions:
+    contents: read
+    packages: write
 
 jobs:
     check-secrets:
@@ -43,8 +53,11 @@ jobs:
         steps:
             - id: check
               shell: bash
+              env:
+                  ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
+                  ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
               run: |
-                  if [ -n "${{ secrets.ARGOCD_TOKEN }}" ] && [ -n "${{ secrets.ARGOCD_SERVER }}" ]; then
+                  if [ -n "$ARGOCD_TOKEN" ] && [ -n "$ARGOCD_SERVER" ]; then
                     echo "has_argo_secrets=true" >> $GITHUB_OUTPUT
                   else
                     echo "has_argo_secrets=false" >> $GITHUB_OUTPUT
@@ -55,16 +68,20 @@ jobs:
         steps:
             - name: Checkout code
               uses: actions/checkout@v7
+              with:
+                  ref: ${{ inputs.ref }}
 
             - name: Calculate Variables
               id: vars
+              env:
+                  IMAGE_NAME_INPUT: ${{ inputs.image_name }}
               run: |
-                  REPO_OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-                  REPO_NAME_LOWER=$(echo "${{ github.repository }}" | cut -d '/' -f 2 | tr '[:upper:]' '[:lower:]')
+                  REPO_OWNER_LOWER=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+                  REPO_NAME_LOWER=$(echo "$GITHUB_REPOSITORY" | cut -d '/' -f 2 | tr '[:upper:]' '[:lower:]')
 
                   # Use custom image name if provided, otherwise default to repo name
-                  if [ -n "${{ inputs.image_name }}" ]; then
-                    IMAGE_NAME=$(echo "${{ inputs.image_name }}" | tr '[:upper:]' '[:lower:]')
+                  if [ -n "$IMAGE_NAME_INPUT" ]; then
+                    IMAGE_NAME=$(echo "$IMAGE_NAME_INPUT" | tr '[:upper:]' '[:lower:]')
                   else
                     IMAGE_NAME=$REPO_NAME_LOWER
                   fi
@@ -79,7 +96,7 @@ jobs:
               with:
                   registry: ghcr.io
                   username: ${{ github.actor }}
-                  password: ${{ secrets.GHCR_PAT }}
+                  password: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
 
             - name: Build and push
               uses: docker/build-push-action@v7
@@ -95,112 +112,114 @@ jobs:
         needs: [build, check-secrets]
         if: needs.check-secrets.outputs.has_argo_secrets == 'true'
         runs-on: ubuntu-latest
+        concurrency:
+            group: k8s-deploy-${{ inputs.argo_app_name || github.repository }}-${{ inputs.target_namespace }}
+            cancel-in-progress: false
         steps:
             - name: Trigger ArgoCD Deployment
               env:
                   ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
                   ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+                  ARGO_APP_INPUT: ${{ inputs.argo_app_name }}
+                  DEPLOYMENT_INPUT: ${{ inputs.deployment_name }}
+                  NAMESPACE_INPUT: ${{ inputs.target_namespace }}
               run: |
                   set -euo pipefail
 
-                    # Fallback Logic: Input > Repo Name
-                    # We convert to lowercase immediately to ensure API compatibility
-                    REPO_NAME=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')
+                  # Fallback Logic: Input > Repo Name
+                  # We convert to lowercase immediately to ensure API compatibility
+                  REPO_NAME=$(echo "$GITHUB_REPOSITORY" | cut -d '/' -f 2 | tr '[:upper:]' '[:lower:]')
 
-                    RAW_APP="${{ inputs.argo_app_name }}"
-                    APP=${RAW_APP:-$REPO_NAME}
+                  APP=${ARGO_APP_INPUT:-$REPO_NAME}
+                  DEP=${DEPLOYMENT_INPUT:-$REPO_NAME}
+                  NS="$NAMESPACE_INPUT"
 
-                    RAW_DEP="${{ inputs.deployment_name }}"
-                    DEP=${RAW_DEP:-$REPO_NAME}
+                  echo "Targeting Argo App: $APP"
+                  echo "Restarting Deployment: $DEP"
 
-                    NS="${{ inputs.target_namespace }}"
+                  argo_api_post() {
+                    local url="$1"
+                    local payload="$2"
+                    local action_name="$3"
+                    local max_retries="${4:-3}"
+                    local retry_count=0
+                    local wait_time=2
 
-                    echo "Targeting Argo App: $APP"
-                    echo "Restarting Deployment: $DEP"
+                    local body_file
+                    local header_file
+                    local http_code
+                    local content_type
+                    local error_code
 
-                    argo_api_post() {
-                      local url="$1"
-                      local payload="$2"
-                      local action_name="$3"
-                      local max_retries="${4:-3}"
-                      local retry_count=0
-                      local wait_time=2
+                    while [[ $retry_count -lt $max_retries ]]; do
+                      body_file=$(mktemp)
+                      header_file=$(mktemp)
 
-                      local body_file
-                      local header_file
-                      local http_code
-                      local content_type
-                      local error_code
-
-                      while [[ $retry_count -lt $max_retries ]]; do
-                        body_file=$(mktemp)
-                        header_file=$(mktemp)
-
-                        if ! http_code=$(curl --silent --show-error --output "$body_file" --dump-header "$header_file" --write-out "%{http_code}" --request POST "$url" \
-                          -H "Authorization: Bearer $ARGOCD_TOKEN" \
-                          -H "Content-Type: application/json" \
-                          -d "$payload"); then
-                          echo "ArgoCD API call failed during: $action_name"
-                          rm -f "$body_file" "$header_file"
-                          exit 1
-                        fi
-
-                        content_type=$(awk -F': *' 'tolower($1)=="content-type" {print tolower($2)}' "$header_file" | tr -d '\r' | tail -n 1)
-
-                        echo "ArgoCD API status ($action_name): $http_code"
-
-                        if [[ "$http_code" =~ ^2 ]]; then
-                          echo "Response ($action_name):"
-                          sed -n '1,40p' "$body_file"
-                          rm -f "$body_file" "$header_file"
-                          return 0
-                        fi
-
-                        # Check if this is a retryable error (operation in progress)
-                        error_code=$(grep -o '"code":[0-9]*' "$body_file" 2>/dev/null | grep -o '[0-9]*$' || echo "")
-                        if [[ "$error_code" == "9" ]] && [[ $retry_count -lt $((max_retries - 1)) ]]; then
-                          echo "Operation already in progress (code 9). Retrying in ${wait_time}s (attempt $((retry_count + 1))/$max_retries)..."
-                          rm -f "$body_file" "$header_file"
-                          sleep "$wait_time"
-                          wait_time=$((wait_time * 2))
-                          retry_count=$((retry_count + 1))
-                          continue
-                        fi
-
-                        # Non-retryable error
-                        echo "ArgoCD API returned non-success status during: $action_name"
-                        echo "Response body:"
-                        sed -n '1,80p' "$body_file"
-
-                        if [[ -n "$content_type" && "$content_type" != *"json"* ]]; then
-                          echo "Unexpected content type: $content_type"
-                        fi
-
-                        if grep -qi '<html' "$body_file"; then
-                          echo "Received HTML response - likely redirect/auth/proxy issue"
-                        fi
-
+                      if ! http_code=$(curl --silent --show-error --max-time 30 --connect-timeout 10 --output "$body_file" --dump-header "$header_file" --write-out "%{http_code}" --request POST "$url" \
+                        -H "Authorization: Bearer $ARGOCD_TOKEN" \
+                        -H "Content-Type: application/json" \
+                        -d "$payload"); then
+                        echo "ArgoCD API call failed during: $action_name"
                         rm -f "$body_file" "$header_file"
                         exit 1
-                      done
+                      fi
 
-                      echo "Max retries ($max_retries) exceeded for: $action_name"
+                      content_type=$(awk -F': *' 'tolower($1)=="content-type" {print tolower($2)}' "$header_file" | tr -d '\r' | tail -n 1)
+
+                      echo "ArgoCD API status ($action_name): $http_code"
+
+                      if [[ "$http_code" =~ ^2 ]]; then
+                        echo "Response ($action_name):"
+                        sed -n '1,40p' "$body_file"
+                        rm -f "$body_file" "$header_file"
+                        return 0
+                      fi
+
+                      # Retryable: ArgoCD "operation already in progress" (code 9), or a transient 5xx
+                      error_code=$(grep -o '"code":[0-9]*' "$body_file" 2>/dev/null | grep -o '[0-9]*$' || echo "")
+                      if { [[ "$error_code" == "9" ]] || [[ "$http_code" =~ ^5 ]]; } && [[ $retry_count -lt $((max_retries - 1)) ]]; then
+                        echo "Retryable error (code=$error_code, http=$http_code). Retrying in ${wait_time}s (attempt $((retry_count + 1))/$max_retries)..."
+                        rm -f "$body_file" "$header_file"
+                        sleep "$wait_time"
+                        wait_time=$((wait_time * 2))
+                        retry_count=$((retry_count + 1))
+                        continue
+                      fi
+
+                      # Non-retryable error
+                      echo "ArgoCD API returned non-success status during: $action_name"
+                      echo "Response body:"
+                      sed -n '1,80p' "$body_file"
+
+                      if [[ -n "$content_type" && "$content_type" != *"json"* ]]; then
+                        echo "Unexpected content type: $content_type"
+                      fi
+
+                      if grep -qi '<html' "$body_file"; then
+                        echo "Received HTML response - likely redirect/auth/proxy issue"
+                      fi
+
+                      rm -f "$body_file" "$header_file"
                       exit 1
-                    }
+                    done
 
-                    # Force restart of the specific component
-                    argo_api_post \
-                      "https://${ARGOCD_SERVER}/api/v1/applications/${APP}/resource/actions?namespace=${NS}&resourceName=${DEP}&version=v1&kind=Deployment&group=apps" \
-                      '"restart"' \
-                      "restart deployment"
+                    echo "Max retries ($max_retries) exceeded for: $action_name"
+                    exit 1
+                  }
 
-                    # Wait for restart operation to complete before syncing
-                    echo "Waiting 3 seconds for restart operation to settle..."
-                    sleep 3
+                  # Force restart of the specific component
+                  argo_api_post \
+                    "https://${ARGOCD_SERVER}/api/v1/applications/${APP}/resource/actions?namespace=${NS}&resourceName=${DEP}&version=v1&kind=Deployment&group=apps" \
+                    '"restart"' \
+                    "restart deployment"
 
-                    # Sync ONLY the specific resource (with retries for in-progress operations)
-                    argo_api_post \
-                      "https://${ARGOCD_SERVER}/api/v1/applications/${APP}/sync" \
-                      "{\"resources\": [{\"group\": \"apps\", \"kind\": \"Deployment\", \"name\": \"$DEP\", \"namespace\": \"$NS\"}]}" \
-                      "sync deployment" \
-                      5
+                  # Wait for restart operation to complete before syncing
+                  echo "Waiting 3 seconds for restart operation to settle..."
+                  sleep 3
+
+                  # Sync ONLY the specific resource (with retries for in-progress operations)
+                  argo_api_post \
+                    "https://${ARGOCD_SERVER}/api/v1/applications/${APP}/sync" \
+                    "{\"resources\": [{\"group\": \"apps\", \"kind\": \"Deployment\", \"name\": \"$DEP\", \"namespace\": \"$NS\"}]}" \
+                    "sync deployment" \
+                    5
