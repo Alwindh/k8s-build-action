@@ -4,7 +4,7 @@ on:
     workflow_call:
         inputs:
             ref:
-                description: "Git ref to check out and build. Set this when the caller is triggered by workflow_run (e.g. ${{ github.event.workflow_run.head_sha }}) - without it, checkout falls back to the default branch instead of the ref that actually triggered the run. Leave empty for normal push/dispatch triggers."
+                description: "Git ref to check out and build. Set this when the caller is triggered by workflow_run (pass github.event.workflow_run.head_sha) - without it, checkout falls back to the default branch instead of the ref that actually triggered the run. Leave empty for normal push/dispatch triggers."
                 required: false
                 type: string
             image_name:
