@@ -35,15 +35,12 @@ on:
                 default: "./Dockerfile"
                 type: string
         secrets:
-            GHCR_PAT:
-                description: "Optional. If omitted, GHCR login falls back to the caller's GITHUB_TOKEN (needs the packages: write permission, which this workflow requests by default)."
-                required: false
+            GHCR_PAT: { required: false }
             ARGOCD_TOKEN: { required: false }
             ARGOCD_SERVER: { required: false }
 
 permissions:
     contents: read
-    packages: write
 
 jobs:
     check-secrets:
@@ -96,7 +93,7 @@ jobs:
               with:
                   registry: ghcr.io
                   username: ${{ github.actor }}
-                  password: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+                  password: ${{ secrets.GHCR_PAT }}
 
             - name: Build and push
               uses: docker/build-push-action@v7
