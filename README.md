@@ -40,6 +40,7 @@ a bug pushed to `main` here takes effect on every caller's very next run.
 
 | Input | Default | Notes |
 |---|---|---|
+| `runner` | `k8s` | Runner pool for all three jobs. Defaults to the in-cluster ARC scale set; **callers should not set this** — see "Where these jobs run". |
 | `ref` | *(unset)* | Git ref to check out and build. **Required if your caller is triggered by `workflow_run`** - see below. |
 | `image_name` | repo name | GHCR image name |
 | `argo_app_name` | repo name | ArgoCD Application name |
@@ -47,6 +48,52 @@ a bug pushed to `main` here takes effect on every caller's very next run.
 | `target_namespace` | `default` | K8s namespace |
 | `build_context` | `.` | Docker build context |
 | `dockerfile_path` | `./Dockerfile` | Path to Dockerfile |
+
+## Where these jobs run
+
+All three jobs run on a **self-hosted runner inside the cluster** (`runs-on: k8s`),
+not on GitHub-hosted runners. GitHub bills no minutes for self-hosted runners, which
+is the entire point: these repos are private, so every GitHub-hosted minute counts
+against the free allowance.
+
+`k8s` is an [Actions Runner Controller](https://github.com/actions/actions-runner-controller)
+runner scale set. A queued job causes a throwaway pod to start, run the job, and be
+deleted. Logs, checks and PR statuses are unaffected — GitHub sees an ordinary job.
+
+### Why the runner name is the same in every repo
+
+A self-hosted runner can only be registered to **one** repository at a time; sharing
+one across repos requires a GitHub organization. So every repo gets its own scale set
+— but they are all *named* `k8s`. Scale-set names only have to be unique within a
+runner group, and each repo has its own. That is what lets `runs-on` be a single
+constant here instead of a per-repo variable.
+
+Registration lives in `Alwindh/k8s-manifests` under `apps/arc/`. Onboarding a repo
+means adding one line there — never editing the repo itself.
+
+### The escape hatch
+
+The cluster is now a CI dependency. If it is down, mid-rebuild, or ARC is broken,
+change the `runner` input's **default** in `docker-build-deploy.yaml`:
+
+```yaml
+runner:
+    default: "ubuntu-latest"
+```
+
+Every caller on `@main` reverts on its next run. One line, one file, no repo settings
+and no cluster access — which is exactly when you need it.
+
+> **Note the tension with "Versioning" below.** That centrality only holds for callers
+> tracking `@main`. A caller pinned to a tag or SHA keeps the old default until it is
+> bumped, so it will *keep trying the cluster runner* during an outage. Pin for
+> stability or track `@main` for one-switch control — you cannot have both.
+
+### If a job hangs in "Waiting for a runner"
+
+The repo has no scale set registered. Add it to `apps/arc/repos.txt` in
+`k8s-manifests` and re-run the generator; the queued job is picked up as soon as the
+listener registers. Nothing needs re-triggering.
 
 ### Secrets
 
