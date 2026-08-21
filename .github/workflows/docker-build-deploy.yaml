@@ -3,6 +3,16 @@ name: Shared Build and Deploy
 on:
     workflow_call:
         inputs:
+            runner:
+                description: >-
+                    Which runner pool the jobs run on. Defaults to the in-cluster ARC
+                    scale set, which is registered under the same name in every repo, so
+                    callers never pass this. Changing the default here moves EVERY repo
+                    that calls this workflow back to GitHub-hosted runners on its next
+                    run -- that is the intended escape hatch when the cluster is down.
+                required: false
+                default: "k8s"
+                type: string
             ref:
                 description: "Git ref to check out and build. Set this when the caller is triggered by workflow_run (pass github.event.workflow_run.head_sha) - without it, checkout falls back to the default branch instead of the ref that actually triggered the run. Leave empty for normal push/dispatch triggers."
                 required: false
@@ -44,7 +54,7 @@ permissions:
 
 jobs:
     check-secrets:
-        runs-on: ubuntu-latest
+        runs-on: ${{ inputs.runner }}
         outputs:
             has_argo_secrets: ${{ steps.check.outputs.has_argo_secrets }}
         steps:
@@ -61,7 +71,7 @@ jobs:
                   fi
 
     build:
-        runs-on: ubuntu-latest
+        runs-on: ${{ inputs.runner }}
         steps:
             - name: Checkout code
               uses: actions/checkout@v7
@@ -95,6 +105,13 @@ jobs:
                   username: ${{ github.actor }}
                   password: ${{ secrets.GHCR_PAT }}
 
+            # cache-to/cache-from keep the BuildKit layer cache in the registry
+            # rather than on the runner. Runners here are ephemeral -- every job gets a
+            # fresh pod with an empty local cache -- so without this a self-hosted build
+            # is SLOWER than a GitHub-hosted one, not faster. Pushed to a separate
+            # :buildcache tag so it never collides with a real image tag; mode=max keeps
+            # intermediate stages too, which is what makes the multi-stage web build
+            # (npm install + vite build) reusable instead of just the final layer.
             - name: Build and push
               uses: docker/build-push-action@v7
               with:
@@ -104,11 +121,13 @@ jobs:
                   tags: |
                       ${{ env.IMAGE_URL }}:${{ github.sha }}
                       ${{ env.IMAGE_URL }}:latest
+                  cache-from: type=registry,ref=${{ env.IMAGE_URL }}:buildcache
+                  cache-to: type=registry,ref=${{ env.IMAGE_URL }}:buildcache,mode=max
 
     deploy:
         needs: [build, check-secrets]
         if: needs.check-secrets.outputs.has_argo_secrets == 'true'
-        runs-on: ubuntu-latest
+        runs-on: ${{ inputs.runner }}
         concurrency:
             group: k8s-deploy-${{ inputs.argo_app_name || github.repository }}-${{ inputs.target_namespace }}
             cancel-in-progress: false
