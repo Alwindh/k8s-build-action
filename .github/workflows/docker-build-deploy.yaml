@@ -53,12 +53,22 @@ permissions:
     contents: read
 
 jobs:
-    check-secrets:
+    build:
         runs-on: ${{ inputs.runner }}
         outputs:
-            has_argo_secrets: ${{ steps.check.outputs.has_argo_secrets }}
+            has_argo_secrets: ${{ steps.check-secrets.outputs.has_argo_secrets }}
         steps:
-            - id: check
+            # This used to be its own `check-secrets` job. A job is a whole runner:
+            # on GitHub-hosted that was a billed minute rounded up from ~5 seconds, and
+            # on the in-cluster runners it is a pod creation, an image check, a runner
+            # registration and a teardown -- while holding one of the maxRunners slots
+            # that everything else is queueing for. For a five-line `if`.
+            #
+            # `build` is already running and already has the secrets, so it can answer
+            # the question for free. `deploy` still keys its `if:` off this, so the
+            # build-only mode (omit both secrets, deploy is skipped) behaves exactly as
+            # before -- the job is skipped, not run-and-does-nothing.
+            - id: check-secrets
               shell: bash
               env:
                   ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
@@ -70,9 +80,6 @@ jobs:
                     echo "has_argo_secrets=false" >> $GITHUB_OUTPUT
                   fi
 
-    build:
-        runs-on: ${{ inputs.runner }}
-        steps:
             - name: Checkout code
               uses: actions/checkout@v7
               with:
@@ -125,8 +132,8 @@ jobs:
                   cache-to: type=registry,ref=${{ env.IMAGE_URL }}:buildcache,mode=max
 
     deploy:
-        needs: [build, check-secrets]
-        if: needs.check-secrets.outputs.has_argo_secrets == 'true'
+        needs: [build]
+        if: needs.build.outputs.has_argo_secrets == 'true'
         runs-on: ${{ inputs.runner }}
         concurrency:
             group: k8s-deploy-${{ inputs.argo_app_name || github.repository }}-${{ inputs.target_namespace }}

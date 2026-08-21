@@ -71,6 +71,23 @@ constant here instead of a per-repo variable.
 Registration lives in `Alwindh/k8s-manifests` under `apps/arc/`. Onboarding a repo
 means adding one line there — never editing the repo itself.
 
+### Why this is two jobs and not three
+
+`check-secrets` used to be its own job, just to run a five-line `if` and hand a
+boolean to `deploy`. A job is a whole runner. On GitHub-hosted that was a billed
+minute rounded up from about five seconds of work; on the in-cluster runners it is a
+pod creation, an image check, a runner registration and a teardown — while holding
+one of the `maxRunners` slots that every other queued job is waiting for.
+
+`build` already runs and already has the secrets, so it answers the question for
+free. Behaviour is unchanged: omit `ARGOCD_TOKEN`/`ARGOCD_SERVER` and `deploy` is
+still skipped, not run-and-does-nothing.
+
+The general point is worth remembering when adding to this workflow: **on self-hosted
+runners a job is not free, it is a pod.** Prefer a step in an existing job over a new
+job whenever the work does not need its own runner, its own concurrency group, or to
+fail independently. `deploy` keeps all three, which is why it stays separate.
+
 ### The escape hatch
 
 The cluster is now a CI dependency. If it is down, mid-rebuild, or ARC is broken,
@@ -99,6 +116,7 @@ listener registers. Nothing needs re-triggering.
 
 | Secret | Required | Notes |
 |---|---|---|
+| `ARGOCD_TOKEN` / `ARGOCD_SERVER` presence | — | Checked by a step in `build`, not by a job of its own. `deploy` keys its `if:` off `needs.build.outputs.has_argo_secrets`, so build-only mode still *skips* the deploy job rather than running it empty. |
 | `GHCR_PAT` | No | If omitted, GHCR login falls back to the caller's `GITHUB_TOKEN`. That token needs `packages: write` - either rely on this workflow's own `permissions: packages: write` (sufficient unless your org/repo restricts default token permissions further) or grant it explicitly on the calling job. |
 | `ARGOCD_TOKEN` / `ARGOCD_SERVER` | No | Omit both to skip the `deploy` job entirely (build-only mode). |
 
