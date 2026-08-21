@@ -106,6 +106,24 @@ and no cluster access — which is exactly when you need it.
 > bumped, so it will *keep trying the cluster runner* during an outage. Pin for
 > stability or track `@main` for one-switch control — you cannot have both.
 
+### Timeouts, and why they matter more here
+
+Both jobs set `timeout-minutes` (25 for `build`, 10 for `deploy`). GitHub's default is
+**360**.
+
+That default is reasonable when a runner is a disposable VM someone else pays for. It
+is not reasonable when the runner is one of a small number of slots on a single node:
+a hung job holds a slot for a working day while reporting nothing but *"in progress"*,
+and every other repo's jobs queue behind it. The visible symptom is unrelated repos
+mysteriously stuck in "Waiting for a runner", which sends you looking in the wrong
+place entirely.
+
+This is not hypothetical. A `RUN apk add` reaching `dl-cdn.alpinelinux.org` from inside
+dind stalled a build here for 20+ minutes and would have run the full six hours.
+
+If you add a job to this workflow, give it a timeout. On self-hosted runners an
+unbounded job is a capacity leak, not just a slow build.
+
 ### If a job hangs in "Waiting for a runner"
 
 The repo has no scale set registered. Add it to `apps/arc/repos.txt` in

@@ -55,6 +55,16 @@ permissions:
 jobs:
     build:
         runs-on: ${{ inputs.runner }}
+        # GitHub's default is 360 minutes. On a self-hosted runner that is not a
+        # disposable VM someone else pays for -- it is one of a small number of slots
+        # on a single node, and a hung build holds one for a working day while
+        # reporting nothing but "in progress". That is not hypothetical: a `RUN apk add`
+        # reaching dl-cdn.alpinelinux.org from inside dind stalled here for 20+ minutes
+        # and would have run to 6 hours untouched.
+        #
+        # 25 minutes is generous against observed builds (~1-2 min with a warm cache,
+        # longer on a cold one) and still turns a hang into a bounded failure.
+        timeout-minutes: 25
         outputs:
             has_argo_secrets: ${{ steps.check-secrets.outputs.has_argo_secrets }}
         steps:
@@ -135,6 +145,9 @@ jobs:
         needs: [build]
         if: needs.build.outputs.has_argo_secrets == 'true'
         runs-on: ${{ inputs.runner }}
+        # Only curl against the ArgoCD API, with its own bounded retries. If this is
+        # still going after 10 minutes it is wedged, not slow.
+        timeout-minutes: 10
         concurrency:
             group: k8s-deploy-${{ inputs.argo_app_name || github.repository }}-${{ inputs.target_namespace }}
             cancel-in-progress: false
