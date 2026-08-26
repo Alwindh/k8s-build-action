@@ -112,8 +112,39 @@ jobs:
 
                   echo "IMAGE_URL=ghcr.io/$REPO_OWNER_LOWER/$IMAGE_NAME" >> $GITHUB_ENV
 
+            # network=host puts BuildKit in dind's own network namespace instead of
+            # giving it a container on the docker0 bridge. That removes a network hop,
+            # and with it an MTU mismatch that has already cost one build 20+ minutes.
+            #
+            # The layering without it: pod eth0 is Canal's, at MTU 1450. dockerd runs in
+            # the same pod, so its own egress is that same 1450 interface -- but the
+            # docker0 bridge it creates defaults to 1500, and BuildKit's container sits
+            # on docker0. So BuildKit emits 1500-byte frames into a 1450-byte path. That
+            # needs path-MTU discovery to work, and when the ICMP "fragmentation needed"
+            # reply is filtered anywhere in between -- routinely the case -- the sender
+            # never learns and simply retransmits forever.
+            #
+            # The symptom is diagnostic and matches exactly what we saw: small packets
+            # get through, so DNS resolves and the TLS handshake completes; the first
+            # full-size data packet does not, so the transfer hangs rather than failing.
+            # `RUN apk add --no-cache gettext` reaching dl-cdn.alpinelinux.org stalled
+            # 20+ minutes on that, while a `docker build` with no large fetch finished in
+            # 60s. That line was deleted to get the build through; the cause outlived it.
+            #
+            # Measured 2026-08-26: the same `apk add gettext` in a bare pod in `arc`,
+            # outside dind, completed in 0.57s. Cluster DNS, egress and the pod MTU are
+            # all fine. The fault is in the layer dind adds, and this is the one line
+            # that removes that layer.
+            #
+            # The chart cannot fix it from the other side: gha-runner-scale-set 0.14.2
+            # hardcodes dockerd's flags with no --mtu, and `_helpers.tpl` discards a
+            # values-supplied container named `dind` outright. Owning the sidecar means
+            # hand-maintaining a ~60-line pod spec across every ARC upgrade. This is one
+            # line, changes no chart, and reaches every caller through @main.
             - name: Set up Docker Buildx
               uses: docker/setup-buildx-action@v4
+              with:
+                  driver-opts: network=host
 
             - name: Login to GHCR
               uses: docker/login-action@v4
