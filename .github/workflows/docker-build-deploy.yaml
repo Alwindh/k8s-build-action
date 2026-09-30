@@ -176,8 +176,9 @@ jobs:
         needs: [build]
         if: needs.build.outputs.has_argo_secrets == 'true'
         runs-on: ${{ inputs.runner }}
-        # Only curl against the ArgoCD API, with its own bounded retries. If this is
-        # still going after 10 minutes it is wedged, not slow.
+        # Only curl against the ArgoCD API, with its own bounded retries: two calls, each
+        # at most 5 attempts x 30s (--max-time) plus 30s of backoff, so ~6 minutes worst
+        # case. If this is still going after 10 minutes it is wedged, not slow.
         timeout-minutes: 10
         concurrency:
             group: k8s-deploy-${{ inputs.argo_app_name || github.repository }}-${{ inputs.target_namespace }}
@@ -217,17 +218,41 @@ jobs:
                     local http_code
                     local content_type
                     local error_code
+                    local curl_exit
 
                     while [[ $retry_count -lt $max_retries ]]; do
                       body_file=$(mktemp)
                       header_file=$(mktemp)
 
-                      if ! http_code=$(curl --silent --show-error --max-time 30 --connect-timeout 10 --output "$body_file" --dump-header "$header_file" --write-out "%{http_code}" --request POST "$url" \
+                      curl_exit=0
+                      http_code=$(curl --silent --show-error --max-time 30 --connect-timeout 10 --output "$body_file" --dump-header "$header_file" --write-out "%{http_code}" --request POST "$url" \
                         -H "Authorization: Bearer $ARGOCD_TOKEN" \
                         -H "Content-Type: application/json" \
-                        -d "$payload"); then
-                        echo "ArgoCD API call failed during: $action_name"
+                        -d "$payload") || curl_exit=$?
+
+                      if [[ $curl_exit -ne 0 ]]; then
                         rm -f "$body_file" "$header_file"
+
+                        # Retryable: ArgoCD never answered -- DNS (6), refused (7), timeout (28),
+                        # TLS handshake (35), connection dropped (52/55/56). These used to exit on
+                        # the first try, so a single 10s connect timeout failed a deploy whose
+                        # image was already pushed (magicounter, 2026-09-28, as the cluster came
+                        # back from an outage). Retrying is safe: a second restart is just another
+                        # rollout, and a second sync gets the code 9 handling below. Other curl
+                        # failures (bad certificate, malformed URL) are config and still fail at once.
+                        case "$curl_exit" in
+                          6|7|28|35|52|55|56)
+                            if [[ $retry_count -lt $((max_retries - 1)) ]]; then
+                              echo "ArgoCD unreachable (curl exit $curl_exit). Retrying in ${wait_time}s (attempt $((retry_count + 1))/$max_retries)..."
+                              sleep "$wait_time"
+                              wait_time=$((wait_time * 2))
+                              retry_count=$((retry_count + 1))
+                              continue
+                            fi
+                            ;;
+                        esac
+
+                        echo "ArgoCD API call failed during: $action_name"
                         exit 1
                       fi
 
@@ -274,11 +299,14 @@ jobs:
                     exit 1
                   }
 
-                  # Force restart of the specific component
+                  # Force restart of the specific component. Five attempts, like sync: as the
+                  # first call, this is the one that finds ArgoCD unreachable, and against 10s
+                  # connect timeouts three attempts span ~36s where five span ~80s.
                   argo_api_post \
                     "https://${ARGOCD_SERVER}/api/v1/applications/${APP}/resource/actions?namespace=${NS}&resourceName=${DEP}&version=v1&kind=Deployment&group=apps" \
                     '"restart"' \
-                    "restart deployment"
+                    "restart deployment" \
+                    5
 
                   # Wait for restart operation to complete before syncing
                   echo "Waiting 3 seconds for restart operation to settle..."
