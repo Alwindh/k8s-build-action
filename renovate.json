@@ -1,6 +1,11 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended"
+  "extends": ["github>Alwindh/k8s-build-action//renovate/default"],
+  "packageRules": [
+    {
+      "description": "Nothing in this repo merges itself. Every caller tracks @main, so an action bump in docker-build-deploy.yaml reaches every repo's next build unread -- and the only check here validates the Renovate presets, so it would go green on a broken workflow and let it through.",
+      "matchPackageNames": ["*"],
+      "automerge": false
+    }
   ]
 }

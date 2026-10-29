@@ -1,0 +1,42 @@
+name: Validate Renovate presets
+
+on:
+    pull_request:
+        paths:
+            - "renovate/**"
+            - "renovate.json"
+            - ".github/workflows/validate-renovate.yaml"
+    push:
+        branches: [main]
+        paths:
+            - "renovate/**"
+            - "renovate.json"
+            - ".github/workflows/validate-renovate.yaml"
+
+permissions:
+    contents: read
+
+jobs:
+    validate:
+        # GitHub-hosted, deliberately, unlike everything that calls this repo. This repo
+        # is public: its minutes are not billed, and a self-hosted runner on a public
+        # repo runs whatever a fork's pull request puts in front of it, on the node that
+        # serves every app. Neither is true of the private repos, which is why they are
+        # the other way round.
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v7
+            - uses: actions/setup-node@v7
+              with:
+                  node-version: 24
+            # Every app repo reads renovate/default.json from main on its next Renovate
+            # run, so a preset that does not validate breaks Renovate fleet-wide at once
+            # (each repo gets an "Action Required: Fix Renovate Configuration" issue and
+            # stops updating). --no-global validates them as the repo config they are
+            # merged into; --strict also fails on options Renovate would migrate.
+            #
+            # The major is pinned to the one the Mend-hosted app runs; the validator has
+            # to agree with the Renovate that actually reads these files.
+            - name: Validate
+              run: npx --yes --package renovate@44 -- renovate-config-validator --strict --no-global renovate.json renovate/default.json renovate/dormant.json
