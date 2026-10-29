@@ -1,10 +1,15 @@
 # k8s-build-action
 
-Shared, reusable GitHub Actions workflow: build a Docker image, push it to GHCR,
-and (optionally) trigger an ArgoCD restart + sync of a specific Deployment.
+Shared CI for every app repo, in two parts:
 
-Used via `workflow_call` from other repos - it has no repo-specific assumptions
-baked in, so the same file backs every calling repo/environment.
+- A reusable GitHub Actions workflow: build a Docker image, push it to GHCR, and
+  (optionally) trigger an ArgoCD restart + sync of a specific Deployment. On a pull
+  request it builds without publishing, as the repo's PR check.
+- A Renovate preset, `renovate/default.json`, that every repo's `renovate.json`
+  extends — see "Dependency updates" below.
+
+The workflow is used via `workflow_call` from other repos - it has no repo-specific
+assumptions baked in, so the same file backs every calling repo/environment.
 
 ## Usage
 
@@ -14,10 +19,11 @@ name: Build and Deploy
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 concurrency:
-  group: deploy-${{ github.repository }}
+  group: deploy-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -35,6 +41,10 @@ jobs:
 
 Pin `@main` to a released tag (see "Versioning" below) once you're past initial setup -
 a bug pushed to `main` here takes effect on every caller's very next run.
+
+`pull_request:` makes the same workflow the repo's PR check — see "Pull request builds"
+below. Keep `github.ref` in the concurrency group if you have one: without it a PR run
+and a `main` run share a group, and a Renovate PR opening would cancel a deploy halfway.
 
 ### Inputs
 
@@ -204,3 +214,107 @@ are structured.
 Consumers should pin to a released tag rather than `@main` once this workflow is
 past initial iteration, so a change here doesn't silently alter every caller's next
 run with no rollback point.
+
+## Pull request builds
+
+A caller that adds `pull_request:` to its triggers gets a PR check from this workflow:
+`build` runs in full against the PR's merge commit, and nothing is published — no
+tags, no `:buildcache` write — and `deploy` is skipped. Callers that do not trigger on
+`pull_request` are unaffected.
+
+That check is what Renovate's automerge waits on (next section). Most app repos have
+no CI of their own, and until now their `automerge.yml` merged Renovate PRs without
+building them at all, so a dependency that broke the build was found by the deploy on
+`main`. Now it is found on the PR, and the PR does not merge.
+
+The check is exactly as strong as the Dockerfile: for a front end that runs
+`npm ci && npm run build` (typecheck + bundle) it catches most breakage; for a back
+end whose image only runs `npm ci --omit=dev` it proves the lockfile installs and
+little else. A repo that wants more adds its own `ci.yml`, as mars-tracker and
+magicounter do — Renovate waits for every check, not just this one.
+
+## Dependency updates
+
+`renovate/default.json` is the dependency policy for every app repo, in the same way
+`docker-build-deploy.yaml` is the build: each repo's `renovate.json` is a stub that
+extends it, and a change here applies to every repo on its next Renovate run.
+
+```json
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>Alwindh/k8s-build-action//renovate/default"]
+}
+```
+
+Anything after `extends` is that repo's own exception (an `allowedVersions` cap, a
+`baseBranchPatterns` for a repo that deploys from `development`) and nothing else.
+
+### What it does
+
+| Update | What happens |
+|---|---|
+| minor / patch / digest | One grouped PR per repo per week (Mondays), merges itself once every check is green |
+| npm releases | Not proposed until 3 days old (`security:minimumReleaseAgeNpm`) — the window in which compromised npm releases have historically been caught and pulled |
+| lock file maintenance | Refreshes transitive deps on the 1st of the month, merges itself on green |
+| major | No PR. Listed on the repo's Dependency Dashboard issue; tick it and the PR opens immediately and waits for you |
+| GitHub Actions major (`uses:`) | Treated as a minor — the PR's own CI runs on the new version |
+| security fix (GitHub advisory or OSV) | Immediately, outside the schedule and the release-age wait. Non-major fixes merge on green |
+| anything that fails CI | Stays open and is assigned to you — the only PRs that ask for anything |
+
+So the list at [github.com/pulls/assigned](https://github.com/pulls/assigned) is the
+whole inbox: a red group PR, or a major you asked for.
+
+### Why Renovate merges, not GitHub and not a workflow
+
+**`platformAutomerge: false`.** GitHub's native auto-merge merges when the branch's
+*required* checks pass. None of these repos has branch protection (a private repo on a
+free personal plan cannot), so there are no required checks and native auto-merge has
+nothing to wait for — where it is available at all, it would merge before CI finished.
+Renovate's own merge looks at every check on the commit and merges only when all of
+them are green, and it needs no repo setting to do it. `k8s-manifests` already worked
+this way: its PRs are merged by `renovate[bot]`.
+
+**No `automerge.yml`.** The per-repo `pascalgn/automerge-action` workflows merged
+anything labelled `automerge`, with a PAT, without building it, and each was its own
+copy with its own bugs: a misspelled filename that never ran, a label that never
+matched, a `return` that did not stop the merge step, majors merging because the label
+was on them too. Renovate's own automerge has none of those moving parts, and the
+"needs a check" rule is what makes a broken update stay a PR.
+
+**Renovate merges one PR per repo per run**, and the Mend-hosted app runs active repos
+about every four hours. That is why non-majors are grouped: one weekly PR merges in one
+run. Expect a few hours between "checks green" and "merged", not minutes.
+
+**Repos without any PR check never automerge.** Renovate will not merge something it
+has not seen pass (`ignoreTests` stays false). For a repo that calls this workflow,
+adding `pull_request:` to its triggers is the fix.
+
+### Dormant repos
+
+`renovate/dormant.json` is for repos that are neither deployed nor worked on. It
+disables every dependency, which makes Renovate close the PRs it already opened there
+and close the dashboard issue. Uninstalling the app would stop Renovate before it got
+that far and leave every PR open. To revive a repo, point its stub back at `default`.
+
+### Changing the preset
+
+`.github/workflows/validate-renovate.yaml` validates both presets on every PR that
+touches them. Every repo reads `renovate/default.json` from `main` — there is no
+pinning, by the same reasoning as `@main` above — so a preset that fails validation
+stops Renovate in every repo at once, each with an "Action Required" issue. That
+failure is loud, not silent; a preset that is *valid but wrong* (an `automerge: true`
+in the wrong rule) is the one to read twice.
+
+Nothing in this repo merges itself, Renovate PRs included: see `renovate.json`.
+
+### Not Dependabot
+
+Dependabot was briefly added alongside Renovate and opened duplicates of everything
+Renovate already proposed — plus one PR per *transitive* package, from
+`allow: dependency-type: all`. It has no equivalent of a shared preset (every repo needs
+its own `dependabot.yml`), and it cannot merge anything on a private repo without branch
+protection, which is the problem the old `automerge.yml` files existed to work around.
+
+Leave **Dependabot alerts** on (Settings → Code security): Renovate reads them for its
+security PRs. Turn **Dependabot security updates** off, account-wide, or every advisory
+arrives twice.

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "For repos that are neither deployed nor worked on. Renovate keeps running here but proposes nothing, and that is what clears out the PRs it already opened: a branch whose update is no longer wanted is pruned, and its PR is closed with it. Uninstalling the app or setting `enabled: false` would stop Renovate before it got that far, leaving every open PR where it is. To bring a repo back, point its renovate.json at the default preset instead.",
+  "dependencyDashboard": false,
+  "vulnerabilityAlerts": {
+    "enabled": false
+  },
+  "osvVulnerabilityAlerts": false,
+  "lockFileMaintenance": {
+    "enabled": false
+  },
+  "packageRules": [
+    {
+      "description": "Every dependency, from every manager.",
+      "matchPackageNames": ["*"],
+      "enabled": false
+    }
+  ]
+}

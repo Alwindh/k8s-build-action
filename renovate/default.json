@@ -1,0 +1,49 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Fleet-wide dependency policy. Every app repo's renovate.json extends this and adds only what is genuinely its own -- the same arrangement as docker-build-deploy.yaml, and for the same reason: one policy, changed in one place. See README.md, 'Dependency updates'.",
+  "extends": ["config:recommended", "security:minimumReleaseAgeNpm"],
+  "timezone": "Europe/Amsterdam",
+  "labels": ["dependencies"],
+  "assignees": ["Alwindh"],
+
+  "schedule": ["* * * * 1"],
+
+  "platformAutomerge": false,
+
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "labels": ["dependencies", "security"]
+  },
+
+  "lockFileMaintenance": {
+    "enabled": true,
+    "automerge": true,
+    "schedule": ["* * 1 * *"]
+  },
+
+  "packageRules": [
+    {
+      "description": "Every minor, patch and digest update in a repo travels in one weekly PR and merges itself once every check on it is green. One PR a week instead of one per package is the point: each merge to main is a deploy, and each PR used to be a separate notification, CI run and rollout. If the group goes red, nothing in it merges and Renovate assigns the PR -- that is the only time it asks for anyone.",
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "all non-major dependencies",
+      "groupSlug": "all-minor-patch",
+      "automerge": true
+    },
+    {
+      "description": "Majors do not become PRs until someone ticks them on the repo's Dependency Dashboard issue, and never merge themselves. A major PR nobody asked for is exactly the open-ended kind: it waits for a human whether or not one is coming. Listing it on the dashboard instead keeps it visible without it sitting in the PR list. Ticked majors are created straight away rather than waiting for Monday.",
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true,
+      "automerge": false,
+      "schedule": ["at any time"]
+    },
+    {
+      "description": "Except GitHub Actions majors (actions/checkout v7 -> v8 and the like), which open and merge like a minor. They are the one kind of major that tests itself: a pull_request run uses the workflow file from the PR, so wherever the action sits in a PR workflow, the check that has to pass is already running on the new version. One only used in a deploy workflow is first exercised on main, and the worst case there is a failed deploy, which leaves the running version in place. depType `action` matches `uses:` steps only -- node-version and friends inside `with:` are not this, and stay behind the dashboard with the Dockerfile base image they have to match.",
+      "matchManagers": ["github-actions"],
+      "matchDepTypes": ["action"],
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": false,
+      "automerge": true,
+      "schedule": ["* * * * 1"]
+    }
+  ]
+}

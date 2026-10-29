@@ -160,21 +160,33 @@ jobs:
             # :buildcache tag so it never collides with a real image tag; mode=max keeps
             # intermediate stages too, which is what makes the multi-stage web build
             # (npm install + vite build) reusable instead of just the final layer.
+            #
+            # On a pull_request run this is a check, not a release: the image is built
+            # in full and published nowhere -- no tags, no cache write, and `deploy`
+            # below is skipped. That is what lets a caller add `pull_request:` to its
+            # triggers and get a PR status for free: the same Dockerfile that would
+            # ship, built from the PR's commit. Renovate's automerge waits on that
+            # status, so for a repo with no CI of its own this IS the gate. The cache
+            # is still read, so a PR build costs what a main build does; it is only
+            # not written, so a PR's layers never become what main builds from next.
             - name: Build and push
               uses: docker/build-push-action@v7
               with:
                   context: ${{ inputs.build_context }}
                   file: ${{ inputs.dockerfile_path }}
-                  push: true
+                  push: ${{ github.event_name != 'pull_request' }}
                   tags: |
                       ${{ env.IMAGE_URL }}:${{ github.sha }}
                       ${{ env.IMAGE_URL }}:latest
                   cache-from: type=registry,ref=${{ env.IMAGE_URL }}:buildcache
-                  cache-to: type=registry,ref=${{ env.IMAGE_URL }}:buildcache,mode=max
+                  cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}:buildcache,mode=max', env.IMAGE_URL) || '' }}
 
     deploy:
         needs: [build]
-        if: needs.build.outputs.has_argo_secrets == 'true'
+        # Never from a pull request: that run is a build check (see "Build and push").
+        # Skipped rather than gated inside the step, for the same reason as the
+        # secrets check -- a job that cannot do anything should not take a runner.
+        if: needs.build.outputs.has_argo_secrets == 'true' && github.event_name != 'pull_request'
         runs-on: ${{ inputs.runner }}
         # Only curl against the ArgoCD API, with its own bounded retries: two calls, each
         # at most 5 attempts x 30s (--max-time) plus 30s of backoff, so ~6 minutes worst
