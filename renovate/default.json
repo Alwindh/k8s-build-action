@@ -1,8 +1,16 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Fleet-wide dependency policy. Every app repo's renovate.json extends this and adds only what is genuinely its own -- the same arrangement as docker-build-deploy.yaml, and for the same reason: one policy, changed in one place. See README.md, 'Dependency updates'.",
+  "description": [
+    "Fleet-wide dependency policy. Every app repo's renovate.json extends this and adds only what is genuinely its own -- the same arrangement as docker-build-deploy.yaml, and for the same reason: one policy, changed in one place. See README.md, 'Dependency updates'.",
+    "constraints.npm keeps Renovate's own npm below 12 when it regenerates package-lock.json. npm 12 refuses to fetch the tarball of any package that declares bundleDependencies during --package-lock-only (npm/cli#9800, unfixed as of 12.0.2), so every lockfile update in a repo using Tailwind 4 (@tailwindcss/oxide-wasm32-wasi) failed with EALLOWREMOTE. npm 11 is also the npm that Node 24 bundles. Lift this once a fixed npm 12 ships."
+  ],
   "extends": ["config:recommended", "security:minimumReleaseAgeNpm"],
   "timezone": "Europe/Amsterdam",
+
+  "constraints": {
+    "npm": "<12"
+  },
+
   "labels": ["dependencies"],
   "assignees": ["Alwindh"],
 

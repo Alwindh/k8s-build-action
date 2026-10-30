@@ -289,6 +289,16 @@ run. Expect a few hours between "checks green" and "merged", not minutes.
 has not seen pass (`ignoreTests` stays false). For a repo that calls this workflow,
 adding `pull_request:` to its triggers is the fix.
 
+### npm stays below 12 for lockfile updates
+
+`constraints.npm: "<12"` pins the npm that Renovate uses to rewrite `package-lock.json`.
+npm 12 refuses to download a package that declares `bundleDependencies` while it builds a
+lockfile ([npm/cli#9800](https://github.com/npm/cli/issues/9800)), so in any repo with
+Tailwind 4 every lockfile update failed with `EALLOWREMOTE` and an "Artifact update
+problem" comment. npm 11 is also the npm that Node 24 bundles, so the lockfile comes
+from the same npm major that the Node 24 images run. Remove the constraint once a fixed
+npm 12 is out.
+
 ### Dormant repos
 
 `renovate/dormant.json` is for repos that are neither deployed nor worked on. It
