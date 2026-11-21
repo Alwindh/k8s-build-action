@@ -192,8 +192,14 @@ jobs:
         # at most 5 attempts x 30s (--max-time) plus 30s of backoff, so ~6 minutes worst
         # case. If this is still going after 10 minutes it is wedged, not slow.
         timeout-minutes: 10
+        # Keyed per Deployment, not just per Application. GitHub keeps one pending job per
+        # group, so when one repo deploys two Deployments of the same app (traveltab's
+        # frontend and API), a third deploy arriving while one runs and one waits would
+        # cancel the waiting one, and that Deployment would never restart. Two deploys of
+        # one app can run at once: the restart action is not an Argo CD operation, and a
+        # sync that finds another in progress gets code 9, which argo_api_post retries.
         concurrency:
-            group: k8s-deploy-${{ inputs.argo_app_name || github.repository }}-${{ inputs.target_namespace }}
+            group: k8s-deploy-${{ inputs.argo_app_name || github.repository }}-${{ inputs.target_namespace }}-${{ inputs.deployment_name || github.repository }}
             cancel-in-progress: false
         steps:
             - name: Trigger ArgoCD Deployment

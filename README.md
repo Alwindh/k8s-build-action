@@ -145,7 +145,7 @@ listener registers. Nothing needs re-triggering.
 | Secret | Required | Notes |
 |---|---|---|
 | `ARGOCD_TOKEN` / `ARGOCD_SERVER` presence | — | Checked by a step in `build`, not by a job of its own. `deploy` keys its `if:` off `needs.build.outputs.has_argo_secrets`, so build-only mode still *skips* the deploy job rather than running it empty. |
-| `GHCR_PAT` | No | If omitted, GHCR login falls back to the caller's `GITHUB_TOKEN`. That token needs `packages: write` - either rely on this workflow's own `permissions: packages: write` (sufficient unless your org/repo restricts default token permissions further) or grant it explicitly on the calling job. |
+| `GHCR_PAT` | Yes | Logs in to GHCR on every run, pull requests included (they still read the registry cache). Without it the build fails at "Login to GHCR" with `Password required`: there is no fallback to `GITHUB_TOKEN`, and this workflow asks for `contents: read` only. A classic token with `write:packages`. |
 | `ARGOCD_TOKEN` / `ARGOCD_SERVER` | No | Omit both to skip the `deploy` job entirely (build-only mode). |
 
 ### Triggering from `workflow_run` (deploy-after-CI pattern)
@@ -177,10 +177,17 @@ triggered the run - the build would silently build/deploy the wrong commit.
 
 ### Concurrency
 
-The `deploy` job carries its own `concurrency` group (keyed off `argo_app_name` /
-`target_namespace`), so two overlapping runs targeting the same ArgoCD app can't race
-each other's restart/sync calls regardless of what concurrency settings (if any) the
-caller workflow sets at its own level. It's intentionally set to
+The `deploy` job carries its own `concurrency` group (keyed off `argo_app_name`,
+`target_namespace` and `deployment_name`), so two overlapping runs restarting the same
+Deployment can't race each other's restart/sync calls regardless of what concurrency
+settings (if any) the caller workflow sets at its own level.
+
+The Deployment is part of the key because GitHub keeps only one *pending* job per group.
+A repo that deploys two Deployments of one Argo CD app, like `traveltab` (frontend and
+API), would otherwise share one group: a third deploy arriving while one runs and one
+waits cancels the waiting one, and that Deployment is never restarted. Deploys of
+different Deployments in one app can safely overlap: the restart action is not an Argo
+CD operation, and a sync that finds another in progress gets code 9, which is retried. It's intentionally set to
 `cancel-in-progress: false` - once a deploy starts, it runs to completion rather than
 being killed mid-way through mutating a live Deployment.
 
